@@ -125,7 +125,7 @@ export function EvMapExperience() {
             <div className="flex items-start justify-between gap-3 px-6 py-8">
               <div>
                 <h1 className="mb-1 text-lg font-black text-emerald-600">
-                  Luminous Navigator
+                  MapEV Station
                 </h1>
                 <p className="text-[10px] font-bold tracking-[0.22em] text-zinc-400 uppercase">
                   Precision EV Logistics
