@@ -184,12 +184,10 @@ export function EvRoutePanel({
         <div
           className={cn(
             "rounded-2xl border border-white/35 bg-white/90 p-4 shadow-xl backdrop-blur-xl md:p-6",
-            isUpcomingStepsOpen
-              ? "min-h-0 flex-1 overflow-y-auto no-scrollbar"
-              : "shrink-0",
+            isUpcomingStepsOpen ? "min-h-0 flex flex-1 flex-col" : "shrink-0",
           )}
         >
-          <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="mb-3 flex items-center justify-between gap-2 border-b border-slate-200/80 pb-3">
             <h3 className="flex items-center gap-2 text-sm font-bold text-slate-600">
               <Route className="h-4 w-4" />
               Upcoming Steps
@@ -244,37 +242,39 @@ export function EvRoutePanel({
           </div>
 
           {isUpcomingStepsOpen && (
-            <div className="space-y-5">
-              {routePlan?.steps.map((step, index) => (
-                <div key={step.id} className="flex gap-4">
-                  <div className="flex flex-col items-center">
-                    <div
-                      className={cn(
-                        "h-2.5 w-2.5 rounded-full",
-                        index === 0 ? "bg-emerald-500" : "bg-slate-300",
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1 no-scrollbar">
+              <div className="space-y-5">
+                {routePlan?.steps.map((step, index) => (
+                  <div key={step.id} className="flex gap-4">
+                    <div className="flex flex-col items-center">
+                      <div
+                        className={cn(
+                          "h-2.5 w-2.5 rounded-full",
+                          index === 0 ? "bg-emerald-500" : "bg-slate-300",
+                        )}
+                      />
+                      {index < routePlan.steps.length - 1 && (
+                        <div className="my-1 h-12 w-0.5 bg-slate-200" />
                       )}
-                    />
-                    {index < routePlan.steps.length - 1 && (
-                      <div className="my-1 h-12 w-0.5 bg-slate-200" />
-                    )}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {step.instruction}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {formatDistance(step.distanceMeters)} •{" "}
+                        {formatDuration(step.durationMinutes)}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">
-                      {step.instruction}
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      {formatDistance(step.distanceMeters)} •{" "}
-                      {formatDuration(step.durationMinutes)}
-                    </p>
-                  </div>
-                </div>
-              ))}
+                ))}
 
-              {!routePlan && (
-                <p className="text-sm text-slate-500">
-                  Select a station to generate route steps.
-                </p>
-              )}
+                {!routePlan && (
+                  <p className="text-sm text-slate-500">
+                    Select a station to generate route steps.
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -168,14 +168,14 @@ export function EvStationPanel({
           })}
         </div>
 
-        <div className="mt-3 grid grid-cols-1 gap-2 md:mt-6 md:gap-4">
-          <button
+        <div className="mt-3 grid grid-cols-1 gap-2 md:mt-6 md:gap-4 border-t border-slate-200 pt-4">
+          {/* <button
             type="button"
             onClick={() => onSearchTextChange("")}
             className="w-full rounded-lg bg-gradient-to-br from-emerald-700 to-emerald-500 py-2 text-xs font-bold tracking-tight text-white shadow-md shadow-emerald-500/20 transition-all hover:scale-[1.01] active:scale-[0.99] md:rounded-xl md:py-3 md:text-sm md:shadow-lg md:shadow-emerald-500/25 md:hover:scale-[1.02] md:active:scale-[0.98]"
           >
             View All Stations
-          </button>
+          </button> */}
 
           {routePlan && (
             <div className="rounded-xl bg-slate-900 px-3 py-2 text-white md:rounded-2xl md:px-4 md:py-3">

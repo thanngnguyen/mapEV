@@ -197,20 +197,20 @@ export function EvMapExperience() {
                 />
               </div>
               <div className="ml-2 flex items-center gap-1 border-l border-slate-200 pl-2 pr-1">
-                <button
+                {/* <button
                   type="button"
                   className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700"
                   aria-label="Notifications"
                 >
                   <Bell className="h-4 w-4" />
-                </button>
-                <button
+                </button> */}
+                {/* <button
                   type="button"
                   className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700"
                   aria-label="Profile"
                 >
                   <UserCircle2 className="h-4 w-4" />
-                </button>
+                </button> */}
               </div>
             </div>
           </div>
