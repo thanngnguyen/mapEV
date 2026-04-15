@@ -1,5 +1,52 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Traffic-Aware Routing Setup
+
+This project supports API routing providers:
+
+- `mapbox` for traffic-aware ETA (recommended)
+- `osrm` as fallback
+
+### 1. Create local env file
+
+Copy `.env.example` to `.env.local` and set your token:
+
+```bash
+cp .env.example .env.local
+```
+
+Set `NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN` in `.env.local`.
+
+### 2. Provider selection
+
+- `NEXT_PUBLIC_ROUTING_PROVIDER=mapbox` forces Mapbox Directions (profile `driving-traffic`).
+- `NEXT_PUBLIC_ROUTING_PROVIDER=osrm` forces OSRM.
+- If `NEXT_PUBLIC_ROUTING_PROVIDER` is not set, app auto-selects Mapbox when token exists, otherwise OSRM.
+
+When Mapbox is selected but unavailable (invalid token/network issue), the app automatically falls back to OSRM.
+
+## Real Charging Stations API Setup
+
+This project can fetch real charging stations via OpenChargeMap using the server route `GET /api/charging-stations`.
+
+### 1. Configure provider
+
+In `.env.local`:
+
+- `NEXT_PUBLIC_STATION_DATA_PROVIDER=openchargemap` to fetch real stations.
+- `NEXT_PUBLIC_STATION_DATA_PROVIDER=mock` to force local generated stations.
+
+### 2. Optional API key
+
+Set `OPENCHARGEMAP_API_KEY` in `.env.local` for better request quotas.
+
+### 3. Tune search window
+
+- `NEXT_PUBLIC_STATION_SEARCH_RADIUS_KM` (default: `12`)
+- `NEXT_PUBLIC_STATION_MAX_RESULTS` (default: `24`)
+
+If OpenChargeMap is unavailable, the app automatically falls back to local generated station data.
+
 ## Getting Started
 
 First, run the development server:
