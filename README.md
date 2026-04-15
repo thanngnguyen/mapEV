@@ -27,7 +27,7 @@ When Mapbox is selected but unavailable (invalid token/network issue), the app a
 
 ## Real Charging Stations API Setup
 
-This project can fetch real charging stations via OpenChargeMap using the server route `GET /api/charging-stations`.
+This project can fetch real charging stations using the server route `GET /api/charging-stations`.
 
 ### 1. Configure provider
 
@@ -38,14 +38,28 @@ In `.env.local`:
 
 ### 2. Optional API key
 
-Set `OPENCHARGEMAP_API_KEY` in `.env.local` for better request quotas.
+Set `OPENCHARGEMAP_API_KEY` in `.env.local` for OpenChargeMap data.
+
+Optional coverage boost:
+
+- `SERPAPI_API_KEY` to enable SerpApi enrichment.
+- When `SERPAPI_API_KEY` exists, the API uses hybrid aggregation (OpenChargeMap + SerpApi), filters noisy results, and de-duplicates nearby duplicates.
+
+Optional SerpApi tuning:
+
+- `SERPAPI_CHARGING_QUERY` (default: `tram sac xe dien`)
+- `SERPAPI_LANGUAGE` (default: `vi`)
+- `SERPAPI_COUNTRY` (default: `vn`)
 
 ### 3. Tune search window
 
 - `NEXT_PUBLIC_STATION_SEARCH_RADIUS_KM` (default: `12`)
 - `NEXT_PUBLIC_STATION_MAX_RESULTS` (default: `24`)
 
-If OpenChargeMap is unavailable, the app automatically falls back to local generated station data.
+Fallback behavior:
+
+- If at least one real provider succeeds, the API returns real data (including `stations: []` when no station is found).
+- The app falls back to local generated stations only when no external provider is available.
 
 ## Getting Started
 

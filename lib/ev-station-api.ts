@@ -3,7 +3,7 @@ import type { ChargingStation, Coordinates } from "@/types/ev-map";
 type StationDataProvider = "openchargemap" | "mock";
 
 type ChargingStationsApiResponse = {
-  source: "openchargemap" | "mock-fallback";
+  source: "openchargemap" | "serpapi" | "hybrid" | "mock-fallback";
   stations: ChargingStation[];
   warning?: string;
 };

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { haversineDistanceMeters } from "@/lib/geo";
 import { generateStationsAroundUser } from "@/lib/ev-stations";
 import type {
   ChargerStandard,
@@ -34,16 +35,75 @@ type OpenChargeMapResponseItem = {
   }>;
 };
 
+type SerpApiLocalResult = {
+  place_id?: string;
+  position?: number;
+  title?: string;
+  type?: string;
+  address?: string;
+  description?: string;
+  phone?: string;
+  hours?: string;
+  extensions?: string[];
+  gps_coordinates?: {
+    latitude?: number;
+    longitude?: number;
+  };
+  links?: {
+    website?: string;
+    directions?: string;
+  };
+};
+
+type SerpApiResponse = {
+  local_results?: SerpApiLocalResult[];
+};
+
 type StationsApiResponse = {
-  source: "openchargemap" | "mock-fallback";
+  source: "openchargemap" | "serpapi" | "hybrid" | "mock-fallback";
+  stations: ChargingStation[];
+  warning?: string;
+};
+
+type ProviderId = "openchargemap" | "serpapi";
+
+type ProviderFetchResult = {
+  provider: ProviderId;
+  succeeded: boolean;
   stations: ChargingStation[];
   warning?: string;
 };
 
 const OPENCHARGEMAP_BASE_URL = "https://api.openchargemap.io/v3/poi";
+const SERPAPI_BASE_URL = "https://serpapi.com/search.json";
 const DEFAULT_SEARCH_RADIUS_KM = 12;
 const DEFAULT_MAX_RESULTS = 24;
 const MAX_ALLOWED_RESULTS = 60;
+const DEFAULT_SERPAPI_QUERY = "tram sac xe dien";
+const DEFAULT_SERPAPI_LANGUAGE = "vi";
+const DEFAULT_SERPAPI_COUNTRY = "vn";
+const DEDUPE_DISTANCE_METERS = 140;
+
+const POSITIVE_CHARGING_KEYWORDS = [
+  "tram sac",
+  "sac xe dien",
+  "charging station",
+  "ev charger",
+  "ev charging",
+  "vinfast",
+  "supercharger",
+];
+
+const NEGATIVE_CHARGING_KEYWORDS = [
+  "rua xe",
+  "car wash",
+  "detailing",
+  "garage",
+  "gara",
+  "nha nghi",
+  "khach san",
+  "hotel",
+];
 
 export const dynamic = "force-dynamic";
 
@@ -252,6 +312,445 @@ function normalizeStation(
   };
 }
 
+function normalizeTextForMatching(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function hashStringToId(value: string): string {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+
+  return Math.abs(hash).toString(36);
+}
+
+function getSerpApiZoomForRadius(radiusKm: number): number {
+  if (radiusKm <= 3) return 14;
+  if (radiusKm <= 8) return 13;
+  if (radiusKm <= 15) return 12;
+  if (radiusKm <= 30) return 11;
+  if (radiusKm <= 60) return 10;
+  return 9;
+}
+
+function isLikelyChargingStationFromSerp(result: SerpApiLocalResult): boolean {
+  const extensionTexts = Array.isArray(result.extensions)
+    ? result.extensions.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+
+  const searchableText = normalizeTextForMatching(
+    [
+      result.title,
+      result.type,
+      result.description,
+      result.address,
+      ...extensionTexts,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" "),
+  );
+
+  const website = normalizeTextForMatching(result.links?.website ?? "");
+  const hasTrustedDomain =
+    website.includes("evcs") ||
+    website.includes("vinfast") ||
+    website.includes("charge") ||
+    website.includes("charger");
+
+  const hasPositiveKeyword = POSITIVE_CHARGING_KEYWORDS.some((keyword) =>
+    searchableText.includes(keyword),
+  );
+  const hasNegativeKeyword = NEGATIVE_CHARGING_KEYWORDS.some((keyword) =>
+    searchableText.includes(keyword),
+  );
+
+  if (hasNegativeKeyword && !hasTrustedDomain) {
+    return false;
+  }
+
+  return hasPositiveKeyword || hasTrustedDomain;
+}
+
+function resolveSerpPowerW(extensions: string[]): number {
+  for (const extension of extensions) {
+    const matchedPower = extension.match(/(\d+(?:[.,]\d+)?)\s*kW/i);
+    if (!matchedPower) {
+      continue;
+    }
+
+    const powerKw = Number(matchedPower[1].replace(",", "."));
+    return resolveConnectionPowerW(powerKw);
+  }
+
+  return 22_000;
+}
+
+function resolveSerpPoleCount(extensions: string[]): number {
+  for (const extension of extensions) {
+    const matchedCount = extension.match(
+      /(?:tong\s*cong|tổng\s*cộng|total)\s*(\d{1,2})/iu,
+    );
+
+    if (!matchedCount) {
+      continue;
+    }
+
+    const count = Number(matchedCount[1]);
+    if (Number.isFinite(count) && count > 0) {
+      return clamp(Math.round(count), 1, 20);
+    }
+  }
+
+  return 2;
+}
+
+function normalizeSerpStation(
+  result: SerpApiLocalResult,
+): ChargingStation | null {
+  if (!isLikelyChargingStationFromSerp(result)) {
+    return null;
+  }
+
+  const latitude = toFiniteNumber(result.gps_coordinates?.latitude);
+  const longitude = toFiniteNumber(result.gps_coordinates?.longitude);
+
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude === null ||
+    longitude === null
+  ) {
+    return null;
+  }
+
+  const name = toNonEmptyString(result.title) ?? "EV Charging Station";
+  const address = toNonEmptyString(result.address) ?? "Unknown address";
+  const extensions = Array.isArray(result.extensions)
+    ? result.extensions.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  const powerW = resolveSerpPowerW(extensions);
+  const poleCount = resolveSerpPoleCount(extensions);
+  const standard = resolveStandard(extensions.join(" "));
+
+  const sourceIdSeed = [
+    result.place_id,
+    name,
+    address,
+    longitude.toFixed(5),
+    latitude.toFixed(5),
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join("|");
+  const stationId = `serp-${hashStringToId(sourceIdSeed)}`;
+
+  const poles: ChargingPole[] = Array.from(
+    { length: poleCount },
+    (_, index) => ({
+      id: `${stationId}-pole-${index + 1}`,
+      powerW,
+      standard,
+      status: "available",
+    }),
+  );
+
+  return {
+    id: stationId,
+    name,
+    address,
+    coordinates: [longitude, latitude],
+    pricePerKwh: inferPricePerKwh(null, powerW),
+    poles,
+  };
+}
+
+async function fetchOpenChargeMapStations(
+  lat: number,
+  lng: number,
+  radiusKm: number,
+  maxResults: number,
+): Promise<ProviderFetchResult> {
+  const apiKey =
+    process.env.OPENCHARGEMAP_API_KEY ??
+    process.env.NEXT_PUBLIC_OPENCHARGEMAP_API_KEY;
+
+  if (!apiKey) {
+    return {
+      provider: "openchargemap",
+      succeeded: false,
+      stations: [],
+      warning: "Missing OPENCHARGEMAP_API_KEY.",
+    };
+  }
+
+  const params = new URLSearchParams({
+    output: "json",
+    compact: "true",
+    verbose: "false",
+    latitude: String(lat),
+    longitude: String(lng),
+    distance: String(radiusKm),
+    distanceunit: "KM",
+    maxresults: String(maxResults),
+    key: apiKey,
+  });
+
+  try {
+    const response = await fetch(
+      `${OPENCHARGEMAP_BASE_URL}?${params.toString()}`,
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          "X-API-Key": apiKey,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      return {
+        provider: "openchargemap",
+        succeeded: false,
+        stations: [],
+        warning: `OpenChargeMap request failed (${response.status}).`,
+      };
+    }
+
+    const payload = (await response.json()) as unknown;
+
+    if (!Array.isArray(payload)) {
+      return {
+        provider: "openchargemap",
+        succeeded: false,
+        stations: [],
+        warning: "OpenChargeMap returned invalid payload.",
+      };
+    }
+
+    return {
+      provider: "openchargemap",
+      succeeded: true,
+      stations: payload
+        .map((item) => normalizeStation(item as OpenChargeMapResponseItem))
+        .filter((station): station is ChargingStation => station !== null),
+    };
+  } catch {
+    return {
+      provider: "openchargemap",
+      succeeded: false,
+      stations: [],
+      warning: "OpenChargeMap is unreachable.",
+    };
+  }
+}
+
+async function fetchSerpApiStations(
+  lat: number,
+  lng: number,
+  radiusKm: number,
+  maxResults: number,
+): Promise<ProviderFetchResult> {
+  const apiKey = process.env.SERPAPI_API_KEY;
+
+  if (!apiKey) {
+    return {
+      provider: "serpapi",
+      succeeded: false,
+      stations: [],
+      warning: "Missing SERPAPI_API_KEY.",
+    };
+  }
+
+  const query =
+    process.env.SERPAPI_CHARGING_QUERY?.trim() || DEFAULT_SERPAPI_QUERY;
+  const language =
+    process.env.SERPAPI_LANGUAGE?.trim() || DEFAULT_SERPAPI_LANGUAGE;
+  const country =
+    process.env.SERPAPI_COUNTRY?.trim() || DEFAULT_SERPAPI_COUNTRY;
+
+  const params = new URLSearchParams({
+    engine: "google_maps",
+    type: "search",
+    q: query,
+    ll: `@${lat},${lng},${getSerpApiZoomForRadius(radiusKm)}z`,
+    hl: language,
+    gl: country,
+    no_cache: "true",
+    api_key: apiKey,
+    num: String(clamp(maxResults, 1, 20)),
+  });
+
+  try {
+    const response = await fetch(`${SERPAPI_BASE_URL}?${params.toString()}`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return {
+        provider: "serpapi",
+        succeeded: false,
+        stations: [],
+        warning: `SerpApi request failed (${response.status}).`,
+      };
+    }
+
+    const payload = (await response.json()) as SerpApiResponse;
+    const localResults = Array.isArray(payload.local_results)
+      ? payload.local_results
+      : [];
+
+    return {
+      provider: "serpapi",
+      succeeded: true,
+      stations: localResults
+        .map((item) => normalizeSerpStation(item))
+        .filter((station): station is ChargingStation => station !== null),
+    };
+  } catch {
+    return {
+      provider: "serpapi",
+      succeeded: false,
+      stations: [],
+      warning: "SerpApi is unreachable.",
+    };
+  }
+}
+
+function normalizeStationNameSignature(name: string): string {
+  return normalizeTextForMatching(name).replace(/\s+/g, " ").trim();
+}
+
+function areLikelyDuplicateStations(
+  first: ChargingStation,
+  second: ChargingStation,
+): boolean {
+  const distance = haversineDistanceMeters(
+    first.coordinates,
+    second.coordinates,
+  );
+
+  if (distance > DEDUPE_DISTANCE_METERS) {
+    return false;
+  }
+
+  const firstName = normalizeStationNameSignature(first.name);
+  const secondName = normalizeStationNameSignature(second.name);
+
+  if (!firstName || !secondName) {
+    return true;
+  }
+
+  return (
+    firstName === secondName ||
+    firstName.includes(secondName) ||
+    secondName.includes(firstName)
+  );
+}
+
+function mergeAndDedupeStations(
+  openChargeMapStations: ChargingStation[],
+  serpStations: ChargingStation[],
+): ChargingStation[] {
+  const mergedStations: ChargingStation[] = [...openChargeMapStations];
+
+  for (const station of serpStations) {
+    if (
+      mergedStations.some((existing) =>
+        areLikelyDuplicateStations(existing, station),
+      )
+    ) {
+      continue;
+    }
+
+    mergedStations.push(station);
+  }
+
+  return mergedStations;
+}
+
+function joinWarnings(warnings: Array<string | undefined>): string | undefined {
+  const merged = warnings.filter((warning): warning is string =>
+    Boolean(warning),
+  );
+
+  if (merged.length === 0) {
+    return undefined;
+  }
+
+  return merged.join(" ");
+}
+
+function getResponseSource(
+  openChargeMapResult: ProviderFetchResult,
+  serpApiResult: ProviderFetchResult,
+): StationsApiResponse["source"] {
+  const hasOpenChargeMapStations = openChargeMapResult.stations.length > 0;
+  const hasSerpStations = serpApiResult.stations.length > 0;
+
+  if (hasOpenChargeMapStations && hasSerpStations) {
+    return "hybrid";
+  }
+
+  if (hasOpenChargeMapStations) {
+    return "openchargemap";
+  }
+
+  if (hasSerpStations) {
+    return "serpapi";
+  }
+
+  if (openChargeMapResult.succeeded && serpApiResult.succeeded) {
+    return "hybrid";
+  }
+
+  if (openChargeMapResult.succeeded) {
+    return "openchargemap";
+  }
+
+  if (serpApiResult.succeeded) {
+    return "serpapi";
+  }
+
+  return "mock-fallback";
+}
+
 function buildFallbackStationsResponse(
   origin: Coordinates,
   warning: string,
@@ -304,79 +803,45 @@ export async function GET(request: NextRequest) {
     MAX_ALLOWED_RESULTS,
   );
 
-  const params = new URLSearchParams({
-    output: "json",
-    compact: "true",
-    verbose: "false",
-    latitude: String(lat),
-    longitude: String(lng),
-    distance: String(radiusKm),
-    distanceunit: "KM",
-    maxresults: String(maxResults),
-  });
+  const [openChargeMapResult, serpApiResult] = await Promise.all([
+    fetchOpenChargeMapStations(lat, lng, radiusKm, maxResults),
+    fetchSerpApiStations(lat, lng, radiusKm, maxResults),
+  ]);
 
-  const apiKey =
-    process.env.OPENCHARGEMAP_API_KEY ??
-    process.env.NEXT_PUBLIC_OPENCHARGEMAP_API_KEY;
+  const stations = mergeAndDedupeStations(
+    openChargeMapResult.stations,
+    serpApiResult.stations,
+  );
+  const warning = joinWarnings([
+    openChargeMapResult.warning,
+    serpApiResult.warning,
+  ]);
+  const source = getResponseSource(openChargeMapResult, serpApiResult);
 
-  if (!apiKey) {
-    return buildFallbackStationsResponse(
-      origin,
-      "Missing OPENCHARGEMAP_API_KEY. Returning local fallback stations.",
-    );
-  }
-
-  params.set("key", apiKey);
-
-  try {
-    const response = await fetch(
-      `${OPENCHARGEMAP_BASE_URL}?${params.toString()}`,
-      {
-        method: "GET",
-        cache: "no-store",
-        headers: {
-          "X-API-Key": apiKey,
-        },
-      },
-    );
-
-    if (!response.ok) {
-      return buildFallbackStationsResponse(
-        origin,
-        `OpenChargeMap request failed (${response.status}). Returning local fallback stations.`,
-      );
-    }
-
-    const payload = (await response.json()) as unknown;
-
-    if (!Array.isArray(payload)) {
-      return buildFallbackStationsResponse(
-        origin,
-        "OpenChargeMap returned invalid payload. Returning local fallback stations.",
-      );
-    }
-
-    const stations = payload
-      .map((item) => normalizeStation(item as OpenChargeMapResponseItem))
-      .filter((station): station is ChargingStation => station !== null);
-
-    if (stations.length === 0) {
-      return buildFallbackStationsResponse(
-        origin,
-        "OpenChargeMap returned no stations. Returning local fallback stations.",
-      );
-    }
-
+  if (stations.length > 0) {
     const body: StationsApiResponse = {
-      source: "openchargemap",
+      source,
       stations,
     };
 
+    if (warning) {
+      body.warning = warning;
+    }
+
     return NextResponse.json(body);
-  } catch {
-    return buildFallbackStationsResponse(
-      origin,
-      "OpenChargeMap is unreachable. Returning local fallback stations.",
-    );
   }
+
+  if (openChargeMapResult.succeeded || serpApiResult.succeeded) {
+    return NextResponse.json({
+      source,
+      stations: [],
+      warning: warning ?? "No charging stations were found for this area.",
+    } as StationsApiResponse);
+  }
+
+  return buildFallbackStationsResponse(
+    origin,
+    warning ??
+      "No external station provider is configured. Returning local fallback stations.",
+  );
 }
